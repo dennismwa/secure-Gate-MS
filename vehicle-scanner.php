@@ -38,7 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['vehicle_qr'])) {
     $vehicle = $stmt->fetch();
     
     if ($vehicle) {
-        // Get last activity
+        // Get last activity from vehicle_logs (not gate_logs)
         $stmt = $db->prepare("SELECT log_type FROM vehicle_logs WHERE vehicle_id = ? ORDER BY log_timestamp DESC LIMIT 1");
         $stmt->execute([$vehicle['vehicle_id']]);
         $last_log = $stmt->fetch();
@@ -54,37 +54,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['vehicle_qr'])) {
                 $stmt->execute([$driver_name, $driver_phone, $driver_license, $vehicle['vehicle_id']]);
             }
             
-            // Record the vehicle activity
+            // Record the vehicle activity in vehicle_logs table
             $stmt = $db->prepare("INSERT INTO vehicle_logs (vehicle_id, log_type, location_id, entry_purpose, driver_name, driver_phone, driver_license, passenger_count, cargo_description, delivery_company, delivery_reference, destination_department, contact_person, expected_duration, operator_id, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $success = $stmt->execute([$vehicle['vehicle_id'], $next_action, $location_id, $entry_purpose, $driver_name ?: $vehicle['driver_name'], $driver_phone ?: $vehicle['driver_phone'], $driver_license ?: $vehicle['driver_license'], $passenger_count, $cargo_description, $delivery_company, $delivery_reference, $destination_department, $contact_person, $expected_duration > 0 ? $expected_duration : null, $session['operator_id'], $notes]);
             
             if ($success) {
-                // Also record in gate_logs for compatibility
-                $stmt = $db->prepare("INSERT INTO gate_logs (visitor_id, vehicle_id, log_type, entry_type, delivery_type, delivery_company, delivery_reference, expected_duration, location_id, operator_id, purpose_of_visit, host_name, host_department, vehicle_number, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                
-                $delivery_type = null;
-                if (in_array($entry_purpose, ['delivery', 'pickup', 'service', 'maintenance'])) {
-                    $delivery_type = $entry_purpose;
-                }
-                
-                $stmt->execute([
-                    null, // visitor_id
-                    $vehicle['vehicle_id'],
-                    $next_action,
-                    $entry_purpose,
-                    $delivery_type,
-                    $delivery_company,
-                    $delivery_reference,
-                    $expected_duration > 0 ? $expected_duration : null,
-                    $location_id,
-                    $session['operator_id'],
-                    $cargo_description,
-                    $contact_person,
-                    $destination_department,
-                    $vehicle['license_plate'],
-                    $notes
-                ]);
-                
                 // Create notification
                 $location_name = '';
                 foreach ($operator_locations as $loc) {
@@ -796,22 +770,6 @@ $message = getMessage();
             });
         }
 
-        // Pre-fill driver info based on QR scan results
-        function updateDriverInfo(vehicleData) {
-            if (vehicleData.driver_name) {
-                document.getElementById('driver_name').value = vehicleData.driver_name;
-            }
-            if (vehicleData.driver_phone) {
-                document.getElementById('driver_phone').value = vehicleData.driver_phone;
-            }
-            if (vehicleData.driver_license) {
-                document.getElementById('driver_license').value = vehicleData.driver_license;
-            }
-            if (vehicleData.owner_company) {
-                document.getElementById('delivery_company').value = vehicleData.owner_company;
-            }
-        }
-
         // Enhanced form validation with real-time feedback
         const formFields = document.querySelectorAll('#vehicleScanForm input, #vehicleScanForm select, #vehicleScanForm textarea');
         formFields.forEach(field => {
@@ -869,46 +827,6 @@ $message = getMessage();
             return /^[+]?[\d\s\-()]{10,15}$/.test(phone);
         }
 
-        // Auto-save form data locally (for mobile users who might lose connection)
-        function saveFormData() {
-            const formData = new FormData(document.getElementById('vehicleScanForm'));
-            const data = {};
-            for (let [key, value] of formData.entries()) {
-                data[key] = value;
-            }
-            localStorage.setItem('vehicle_scan_form', JSON.stringify(data));
-        }
-
-        function loadFormData() {
-            const savedData = localStorage.getItem('vehicle_scan_form');
-            if (savedData) {
-                try {
-                    const data = JSON.parse(savedData);
-                    Object.keys(data).forEach(key => {
-                        const field = document.getElementById(key) || document.querySelector(`[name="${key}"]`);
-                        if (field && key !== 'vehicle_qr') {
-                            field.value = data[key];
-                        }
-                    });
-                } catch (e) {
-                    localStorage.removeItem('vehicle_scan_form');
-                }
-            }
-        }
-
-        // Save form data on input
-        formFields.forEach(field => {
-            field.addEventListener('input', saveFormData);
-        });
-
-        // Load saved form data on page load
-        document.addEventListener('DOMContentLoaded', loadFormData);
-
-        // Clear saved data on successful submission
-        document.getElementById('vehicleScanForm').addEventListener('submit', function() {
-            localStorage.removeItem('vehicle_scan_form');
-        });
-
         // Quick entry presets for common scenarios
         function applyQuickPreset(preset) {
             const presets = {
@@ -943,7 +861,7 @@ $message = getMessage();
             }
         }
 
-        // Add quick preset buttons (optional - can be added to UI)
+        // Add quick preset buttons
         const quickPresets = document.createElement('div');
         quickPresets.className = 'mt-4 flex space-x-2 text-xs';
         quickPresets.innerHTML = `
