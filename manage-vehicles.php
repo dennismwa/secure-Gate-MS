@@ -127,6 +127,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && $action == 'register') {
     }
 }
 
+
 // Handle vehicle update
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && $action == 'update') {
     $vehicle_id = sanitizeInput($_POST['vehicle_id']);
@@ -146,16 +147,86 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && $action == 'update') {
     $is_delivery_vehicle = isset($_POST['is_delivery_vehicle']) ? 1 : 0;
     $status = sanitizeInput($_POST['status']);
     
-    $stmt = $db->prepare("UPDATE vehicles SET license_plate = ?, vehicle_type_id = ?, make = ?, model = ?, year = ?, color = ?, owner_name = ?, owner_phone = ?, owner_company = ?, driver_name = ?, driver_phone = ?, driver_license = ?, is_company_vehicle = ?, is_delivery_vehicle = ?, status = ? WHERE vehicle_id = ?");
+    // Validation
+    $errors = [];
+    if (empty($license_plate)) $errors[] = 'License plate is required';
+    if (empty($make)) $errors[] = 'Vehicle make is required';
+    if (empty($model)) $errors[] = 'Vehicle model is required';
+    if (empty($owner_name)) $errors[] = 'Owner name is required';
+    if (!empty($owner_phone) && !validatePhone($owner_phone)) $errors[] = 'Invalid owner phone format';
+    if (!empty($driver_phone) && !validatePhone($driver_phone)) $errors[] = 'Invalid driver phone format';
     
-    if ($stmt->execute([$license_plate, $vehicle_type_id, $make, $model, $year, $color, $owner_name, $owner_phone, $owner_company, $driver_name, $driver_phone, $driver_license, $is_company_vehicle, $is_delivery_vehicle, $status, $vehicle_id])) {
-        logActivity($db, $session['operator_id'], 'vehicle_update', "Updated vehicle: $license_plate", $_SERVER['REMOTE_ADDR'], $_SERVER['HTTP_USER_AGENT']);
-        setMessage('Vehicle updated successfully', 'success');
-    } else {
-        setMessage('Failed to update vehicle', 'error');
+    // Check if license plate already exists for other vehicles
+    $stmt = $db->prepare("SELECT vehicle_id FROM vehicles WHERE license_plate = ? AND vehicle_id != ?");
+    $stmt->execute([$license_plate, $vehicle_id]);
+    if ($stmt->fetch()) {
+        $errors[] = 'A different vehicle with this license plate already exists';
     }
     
-    header('Location: manage-vehicles.php?action=view&id=' . $vehicle_id);
+    if (empty($errors)) {
+        try {
+            // Update vehicle information
+            $stmt = $db->prepare("UPDATE vehicles SET 
+                license_plate = ?, 
+                vehicle_type_id = ?, 
+                make = ?, 
+                model = ?, 
+                year = ?, 
+                color = ?, 
+                owner_name = ?, 
+                owner_phone = ?, 
+                owner_company = ?, 
+                driver_name = ?, 
+                driver_phone = ?, 
+                driver_license = ?, 
+                is_company_vehicle = ?, 
+                is_delivery_vehicle = ?, 
+                status = ?, 
+                updated_at = NOW() 
+                WHERE vehicle_id = ?");
+            
+            $result = $stmt->execute([
+                $license_plate, 
+                $vehicle_type_id ?: null, 
+                $make, 
+                $model, 
+                $year ?: null, 
+                $color, 
+                $owner_name, 
+                $owner_phone, 
+                $owner_company, 
+                $driver_name, 
+                $driver_phone, 
+                $driver_license, 
+                $is_company_vehicle, 
+                $is_delivery_vehicle, 
+                $status, 
+                $vehicle_id
+            ]);
+            
+            if ($result && $stmt->rowCount() > 0) {
+                logActivity($db, $session['operator_id'], 'vehicle_update', "Updated vehicle: $license_plate", $_SERVER['REMOTE_ADDR'], $_SERVER['HTTP_USER_AGENT']);
+                setMessage('Vehicle updated successfully', 'success');
+            } else {
+                // Check if vehicle exists
+                $checkStmt = $db->prepare("SELECT vehicle_id FROM vehicles WHERE vehicle_id = ?");
+                $checkStmt->execute([$vehicle_id]);
+                if (!$checkStmt->fetch()) {
+                    setMessage('Vehicle not found', 'error');
+                } else {
+                    setMessage('No changes were made to the vehicle', 'warning');
+                }
+            }
+        } catch (Exception $e) {
+            error_log("Vehicle update error: " . $e->getMessage());
+            setMessage('Failed to update vehicle: ' . $e->getMessage(), 'error');
+        }
+    } else {
+        // Set errors in session for display
+        setMessage('Please correct the following errors: ' . implode(', ', $errors), 'error');
+    }
+    
+    header('Location: manage-vehicles.php?action=view&id=' . urlencode($vehicle_id));
     exit;
 }
 
@@ -883,7 +954,8 @@ $message = getMessage();
                     </div>
                     
                     <form method="POST" class="space-y-6">
-                        <input type="hidden" name="vehicle_id" value="<?php echo htmlspecialchars($vehicle['vehicle_id']); ?>">
+    <input type="hidden" name="vehicle_id" value="<?php echo htmlspecialchars($vehicle['vehicle_id']); ?>">
+    
                         
                         <!-- Vehicle Information -->
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
@@ -1033,8 +1105,8 @@ $message = getMessage();
                                 Cancel
                             </a>
                             <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors text-sm sm:text-base">
-                                <i class="fas fa-save mr-2"></i>Update Vehicle
-                            </button>
+        <i class="fas fa-save mr-2"></i>Update Vehicle
+    </button>
                         </div>
                     </form>
                 </div>
