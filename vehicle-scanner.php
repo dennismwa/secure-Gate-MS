@@ -5,6 +5,39 @@ $database = new Database();
 $db = $database->getConnection();
 
 $session = requireAuth($db);
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'search_vehicles') {
+    header('Content-Type: application/json');
+    
+    $search = sanitizeInput($_GET['q'] ?? '');
+    $results = [];
+    
+    if (strlen($search) >= 2) {
+        // Search by last 4 digits of vehicle_id, license plate, make, model, or owner name
+        $stmt = $db->prepare("
+            SELECT vehicle_id, license_plate, make, model, owner_name, owner_company, qr_code 
+            FROM vehicles 
+            WHERE status = 'active' 
+            AND (
+                RIGHT(vehicle_id, 4) LIKE ? 
+                OR license_plate LIKE ? 
+                OR make LIKE ? 
+                OR model LIKE ? 
+                OR owner_name LIKE ?
+                OR CONCAT(make, ' ', model) LIKE ?
+            )
+            ORDER BY license_plate 
+            LIMIT 10
+        ");
+        
+        $search_param = "%$search%";
+        $stmt->execute([$search_param, $search_param, $search_param, $search_param, $search_param, $search_param]);
+        $results = $stmt->fetchAll();
+    }
+    
+    echo json_encode(['success' => true, 'vehicles' => $results]);
+    exit;
+}
+
 $settings = getSettings($db);
 
 // Get operator's locations
@@ -173,6 +206,28 @@ $message = getMessage();
         .animate-pulse {
             animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
         }
+        /* Additional styles for search results */
+#search_results {
+    max-width: calc(100% - 2rem);
+}
+
+.search-result-item {
+    transition: background-color 0.15s ease;
+}
+
+.search-result-item:focus {
+    outline: none;
+    background-color: #f3f4f6;
+}
+
+@media (max-width: 640px) {
+    #search_results {
+        position: fixed;
+        left: 1rem;
+        right: 1rem;
+        max-width: calc(100% - 2rem);
+    }
+}
     </style>
 </head>
 <body class="bg-gray-50">
@@ -352,11 +407,53 @@ $message = getMessage();
                     <input type="hidden" id="vehicle_qr" name="vehicle_qr">
                     <input type="hidden" name="location_id" value="<?php echo $selected_location_id; ?>">
                     
-                    <div>
-                        <label for="manual_qr" class="block text-sm font-medium text-gray-700">Manual QR Entry</label>
-                        <input type="text" id="manual_qr" placeholder="Enter vehicle QR code manually" 
-                               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 text-sm sm:text-base">
-                    </div>
+                    <div class="space-y-3">
+    <label for="vehicle_search" class="block text-sm font-medium text-gray-700">
+        Search Vehicle
+    </label>
+    
+    <div class="relative">
+        <input type="text" 
+               id="vehicle_search" 
+               autocomplete="off"
+               placeholder="Enter: Last 4 digits, License plate, Make/Model, or Owner name" 
+               class="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 text-sm sm:text-base">
+        <div class="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none">
+            <i class="fas fa-search text-gray-400"></i>
+        </div>
+    </div>
+    
+    <!-- Search Results Dropdown -->
+    <div id="search_results" class="hidden absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-64 overflow-y-auto">
+        <!-- Results will be populated here -->
+    </div>
+    
+    <!-- Selected Vehicle Display -->
+    <div id="selected_vehicle_info" class="hidden p-3 bg-green-50 border border-green-200 rounded-lg">
+        <div class="flex items-center justify-between">
+            <div class="flex-1">
+                <div class="flex items-center space-x-2">
+                    <i class="fas fa-check-circle text-green-600"></i>
+                    <span class="font-medium text-green-900" id="selected_vehicle_text"></span>
+                </div>
+                <p class="text-xs text-green-700 mt-1" id="selected_vehicle_details"></p>
+            </div>
+            <button type="button" onclick="clearVehicleSelection()" class="text-red-600 hover:text-red-800">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    </div>
+    
+    <div class="text-xs text-gray-500 space-y-1">
+        <p><i class="fas fa-info-circle mr-1"></i>Quick tips:</p>
+        <ul class="list-disc list-inside ml-4 space-y-0.5">
+            <li>Type last 4 digits of vehicle ID (e.g., "1234")</li>
+            <li>Enter license plate (e.g., "KDA 001A")</li>
+            <li>Search by make/model (e.g., "Toyota Camry")</li>
+            <li>Search by owner name</li>
+        </ul>
+    </div>
+</div>
                     
                     <div>
                         <label for="entry_purpose" class="block text-sm font-medium text-gray-700">Purpose of Visit *</label>
@@ -873,6 +970,239 @@ $message = getMessage();
         // Insert presets after entry purpose field
         const entryPurposeField = document.getElementById('entry_purpose').parentNode;
         entryPurposeField.appendChild(quickPresets);
+        
+        
+        
+        
+        let searchTimeout;
+let currentSearchResults = [];
+
+const vehicleSearchInput = document.getElementById('vehicle_search');
+const searchResultsDiv = document.getElementById('search_results');
+const selectedVehicleInfo = document.getElementById('selected_vehicle_info');
+const vehicleQRInput = document.getElementById('vehicle_qr');
+
+vehicleSearchInput.addEventListener('input', function() {
+    clearTimeout(searchTimeout);
+    const query = this.value.trim();
+    
+    if (query.length < 2) {
+        searchResultsDiv.classList.add('hidden');
+        searchResultsDiv.innerHTML = '';
+        return;
+    }
+    
+    searchTimeout = setTimeout(() => {
+        searchVehicles(query);
+    }, 300);
+});
+
+async function searchVehicles(query) {
+    try {
+        const response = await fetch(`vehicle-scanner.php?ajax=search_vehicles&q=${encodeURIComponent(query)}`);
+        const data = await response.json();
+        
+        if (data.success && data.vehicles.length > 0) {
+            currentSearchResults = data.vehicles;
+            displaySearchResults(data.vehicles);
+        } else {
+            searchResultsDiv.innerHTML = `
+                <div class="p-4 text-center text-gray-500 text-sm">
+                    <i class="fas fa-search mb-2"></i>
+                    <p>No vehicles found</p>
+                    <a href="manage-vehicles.php?action=register" class="text-blue-600 hover:text-blue-800 text-xs mt-1 block">
+                        Register new vehicle
+                    </a>
+                </div>
+            `;
+            searchResultsDiv.classList.remove('hidden');
+        }
+    } catch (error) {
+        console.error('Search error:', error);
+        showNotification('Error searching vehicles', 'error');
+    }
+}
+
+function displaySearchResults(vehicles) {
+    const resultsHTML = vehicles.map((vehicle, index) => `
+        <div class="search-result-item p-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-b-0" 
+             onclick="selectVehicle(${index})"
+             data-index="${index}">
+            <div class="flex items-center justify-between">
+                <div class="flex-1">
+                    <div class="flex items-center space-x-2">
+                        <span class="font-semibold text-gray-900">${escapeHtml(vehicle.license_plate)}</span>
+                        <span class="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded-full">
+                            ${escapeHtml(vehicle.vehicle_id.slice(-4))}
+                        </span>
+                    </div>
+                    <p class="text-sm text-gray-600 mt-0.5">
+                        ${escapeHtml(vehicle.make)} ${escapeHtml(vehicle.model)}
+                    </p>
+                    <p class="text-xs text-gray-500">
+                        Owner: ${escapeHtml(vehicle.owner_name)}
+                        ${vehicle.owner_company ? `(${escapeHtml(vehicle.owner_company)})` : ''}
+                    </p>
+                </div>
+                <div class="text-green-600">
+                    <i class="fas fa-chevron-right"></i>
+                </div>
+            </div>
+        </div>
+    `).join('');
+    
+    searchResultsDiv.innerHTML = resultsHTML;
+    searchResultsDiv.classList.remove('hidden');
+}
+
+function selectVehicle(index) {
+    const vehicle = currentSearchResults[index];
+    
+    // Set the QR code value
+    vehicleQRInput.value = vehicle.qr_code;
+    
+    // Update the display
+    document.getElementById('selected_vehicle_text').textContent = 
+        `${vehicle.license_plate} - ${vehicle.make} ${vehicle.model}`;
+    document.getElementById('selected_vehicle_details').textContent = 
+        `Owner: ${vehicle.owner_name}${vehicle.owner_company ? ' (' + vehicle.owner_company + ')' : ''} • ID: ${vehicle.vehicle_id}`;
+    
+    // Show selected vehicle info
+    selectedVehicleInfo.classList.remove('hidden');
+    
+    // Hide search results
+    searchResultsDiv.classList.add('hidden');
+    
+    // Clear search input
+    vehicleSearchInput.value = '';
+    
+    // Enable the process button
+    document.getElementById('processManualQR').disabled = false;
+    
+    showNotification(`Selected: ${vehicle.license_plate}`, 'success');
+}
+
+function clearVehicleSelection() {
+    vehicleQRInput.value = '';
+    selectedVehicleInfo.classList.add('hidden');
+    vehicleSearchInput.value = '';
+    vehicleSearchInput.focus();
+    document.getElementById('processManualQR').disabled = false;
+}
+
+// Close search results when clicking outside
+document.addEventListener('click', function(event) {
+    if (!vehicleSearchInput.contains(event.target) && !searchResultsDiv.contains(event.target)) {
+        searchResultsDiv.classList.add('hidden');
+    }
+});
+
+// Keyboard navigation for search results
+vehicleSearchInput.addEventListener('keydown', function(e) {
+    const items = document.querySelectorAll('.search-result-item');
+    
+    if (e.key === 'ArrowDown' && items.length > 0) {
+        e.preventDefault();
+        items[0].focus();
+        items[0].classList.add('bg-gray-100');
+    } else if (e.key === 'Escape') {
+        searchResultsDiv.classList.add('hidden');
+    }
+});
+
+document.addEventListener('keydown', function(e) {
+    const activeItem = document.activeElement;
+    if (activeItem && activeItem.classList.contains('search-result-item')) {
+        const items = Array.from(document.querySelectorAll('.search-result-item'));
+        const currentIndex = items.indexOf(activeItem);
+        
+        if (e.key === 'ArrowDown' && currentIndex < items.length - 1) {
+            e.preventDefault();
+            items[currentIndex].classList.remove('bg-gray-100');
+            items[currentIndex + 1].focus();
+            items[currentIndex + 1].classList.add('bg-gray-100');
+        } else if (e.key === 'ArrowUp' && currentIndex > 0) {
+            e.preventDefault();
+            items[currentIndex].classList.remove('bg-gray-100');
+            items[currentIndex - 1].focus();
+            items[currentIndex - 1].classList.add('bg-gray-100');
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            activeItem.click();
+        } else if (e.key === 'Escape') {
+            searchResultsDiv.classList.add('hidden');
+            vehicleSearchInput.focus();
+        }
+    }
+});
+
+// Update processManualQR button to use the selected vehicle
+document.getElementById('processManualQR').addEventListener('click', function() {
+    const qrValue = vehicleQRInput.value.trim();
+    
+    if (!qrValue) {
+        showNotification('Please search and select a vehicle first', 'warning');
+        vehicleSearchInput.focus();
+        return;
+    }
+    
+    // Validate purpose
+    const purpose = document.getElementById('entry_purpose').value;
+    if ((purpose === 'delivery' || purpose === 'pickup') && !document.getElementById('delivery_company').value.trim()) {
+        showNotification('Please enter the delivery company name', 'warning');
+        document.getElementById('delivery_company').focus();
+        return;
+    }
+    
+    const button = this;
+    const originalText = button.innerHTML;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Processing...';
+    button.disabled = true;
+    
+    setTimeout(() => {
+        document.getElementById('vehicleScanForm').submit();
+    }, 500);
+});
+
+// Helper function
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text || '';
+    return div.innerHTML;
+}
+
+// Update the QR scanner to also populate the vehicle selection
+function processVehicleQR(qrData) {
+    stopCamera();
+    vehicleQRInput.value = qrData;
+    
+    // Try to fetch vehicle details for display
+    fetch(`vehicle-scanner.php?ajax=search_vehicles&q=${qrData.slice(-4)}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success && data.vehicles.length > 0) {
+                const vehicle = data.vehicles[0];
+                document.getElementById('selected_vehicle_text').textContent = 
+                    `${vehicle.license_plate} - ${vehicle.make} ${vehicle.model}`;
+                document.getElementById('selected_vehicle_details').textContent = 
+                    `Owner: ${vehicle.owner_name}${vehicle.owner_company ? ' (' + vehicle.owner_company + ')' : ''} • ID: ${vehicle.vehicle_id}`;
+                selectedVehicleInfo.classList.remove('hidden');
+            }
+        });
+    
+    showNotification('Vehicle QR detected! Processing...', 'success');
+    
+    setTimeout(() => {
+        document.getElementById('vehicleScanForm').submit();
+    }, 500);
+}
+
+// Focus search input on page load
+window.addEventListener('load', function() {
+    if (!vehicleQRInput.value) {
+        vehicleSearchInput.focus();
+    }
+});
     </script>
 </body>
 </html>
